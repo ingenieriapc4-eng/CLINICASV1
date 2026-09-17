@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: clinicasv
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: LICENSE_PUBLIC_KEY
+        sync: false
