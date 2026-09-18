@@ -1,0 +1,51 @@
+PROTOCOLO DE LICENCIAS — V6.2
+
+Producto: ClinicaSV Medical
+
+OBJETIVO
+El centro de licencia de V6.2 deja preparada la aplicación para activaciones online u offline sin guardar una clave privada dentro del programa.
+
+MODELO DE SEGURIDAD
+- La licencia contiene un payload firmado y se valida con Ed25519.
+- La aplicación solo debe conocer la CLAVE PÚBLICA del proveedor.
+- La CLAVE PRIVADA de firma debe permanecer exclusivamente en el servidor/proveedor.
+- El token usa este formato:
+    base64url(JSON del payload).base64url(firma)
+- El payload puede incluir:
+    product
+    license_id
+    type
+    holder
+    issued_at
+    expires_at
+    installation_id
+    machine_binding
+    features[]
+
+VINCULACIÓN
+La instalación genera un installation_id persistente y calcula una huella local del equipo. La licencia puede quedar ligada a ambos. Esto dificulta que copiar solamente el EXE o la base de datos sea suficiente para activar la licencia en otro equipo.
+
+IMPORTANTE
+El centro de licencia V6.2 NO bloquea ni elimina pacientes, historias clínicas, documentos o respaldos por vencimiento. La protección de la licencia controla el uso del software, no la propiedad ni la existencia de los datos.
+
+CONFIGURACIÓN DEL PROVEEDOR
+Antes de activar licencias reales en una instalación se debe definir la variable de entorno:
+    LICENSE_PUBLIC_KEY
+con la clave pública Ed25519 en formato PEM.
+
+En el servidor del proveedor se debe conservar de forma segura la clave privada y generar los tokens firmados. Nunca incluir la clave privada en app.py, el EXE, el ZIP ni en variables distribuidas al cliente.
+
+EJEMPLO DE PAYLOAD
+{
+  "product": "ClinicaSV Medical",
+  "license_id": "LIC-000001",
+  "type": "Anual",
+  "holder": "Cliente / Clínica",
+  "issued_at": "2026-09-10T00:00:00",
+  "expires_at": "2027-09-10T00:00:00",
+  "installation_id": "<id de instalación>",
+  "machine_binding": "<sha256 de huella del equipo>",
+  "features": ["core", "agenda", "contabilidad"]
+}
+
+Este documento describe la infraestructura técnica de V6.2. La política comercial, precios, renovaciones y condiciones contractuales deben definirse por separado.
