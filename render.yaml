@@ -9,9 +9,13 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: DEMO_DATABASE_URL
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       - key: LICENSE_PUBLIC_KEY
         sync: false
       - key: CLINICASV_ONLINE
         value: "1"
+      - key: CLINICASV_DEMO_HOURS
+        value: "72"

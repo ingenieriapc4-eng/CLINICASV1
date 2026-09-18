@@ -55,8 +55,13 @@ DOCS_DIR = os.path.join(UPLOAD_DIR, "documents")
 BRANDING_DIR = os.path.join(UPLOAD_DIR, "branding")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 MAX_BACKUPS = 60
-CURRENT_TERMS_VERSION = "V6.7.2-2026-09"
+CURRENT_TERMS_VERSION = "V6.7.3-2026-09"
 ONLINE_MODE = os.environ.get("CLINICASV_ONLINE", "").strip().lower() in {"1", "true", "yes"}
+DEMO_DATABASE_URL = os.environ.get("DEMO_DATABASE_URL", "").strip()
+try:
+    DEMO_DURATION_HOURS = max(1, int(os.environ.get("CLINICASV_DEMO_HOURS", "72")))
+except (TypeError, ValueError):
+    DEMO_DURATION_HOURS = 72
 ONLINE_DEMO_USER_ID = "demo-online-user"
 LEGACY_TERMS_VERSION = "V6.1-legacy"
 LICENSE_PRODUCT = "ClinicaSV Medical"
@@ -123,9 +128,12 @@ def _ext_ok(filename, allowed):
 # Capa de compatibilidad SQLite / PostgreSQL
 # ---------------------------------------------------------------------------
 
-def _raw_connection():
-    if USE_POSTGRES:
-        return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+def _raw_connection(database_url=None):
+    url = (DATABASE_URL if database_url is None else (database_url or "")).strip()
+    if url:
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -180,8 +188,10 @@ def _column_exists(db, table, column):
 
 def get_db():
     if "db" not in g:
-        g.db = CompatConnection(_raw_connection())
-        if not USE_POSTGRES:
+        demo_db = bool(ONLINE_MODE and session.get("demo_mode") and DEMO_DATABASE_URL)
+        g.demo_database = demo_db
+        g.db = CompatConnection(_raw_connection(DEMO_DATABASE_URL if demo_db else None))
+        if not USE_POSTGRES or demo_db and not DEMO_DATABASE_URL:
             g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
@@ -454,8 +464,9 @@ def _decode_signed_license(token):
 
 
 def _seed_online_demo(db):
-    """Crea una cuenta y datos ficticios de demostración solo en modo ONLINE.
-    La cuenta demo nunca se considera una cuenta real y la demo es de solo lectura.
+    """Crea una cuenta y datos ficticios para el modo DEMO online.
+    Los datos son exclusivamente de demostración. La demo usa una base PostgreSQL
+    separada (DEMO_DATABASE_URL) para no mezclar datos reales con datos de prueba.
     """
     if not ONLINE_MODE:
         return
@@ -535,8 +546,55 @@ def _remove_online_demo(db):
     db.execute("DELETE FROM users WHERE id = ?", (ONLINE_DEMO_USER_ID,))
 
 
-def init_db():
-    raw = _raw_connection()
+
+def _demo_db_connection_for_init():
+    if not DEMO_DATABASE_URL:
+        return None
+    try:
+        return CompatConnection(_raw_connection(DEMO_DATABASE_URL))
+    except Exception as exc:
+        print(f"[demo] No se pudo conectar la base DEMO: {exc}")
+        return None
+
+
+def _demo_trial_status(db):
+    """Devuelve (started_at, expires_at, remaining_seconds, expired)."""
+    started_row = db.execute("SELECT value FROM settings WHERE key = 'demo_started_at'").fetchone()
+    started_raw = (started_row["value"] if started_row else "") or ""
+    now = datetime.now()
+    if not started_raw:
+        started_raw = now.isoformat(timespec="seconds")
+        db.execute(_insert_ignore("settings", ["key", "value"]), ("demo_started_at", started_raw))
+        db.commit()
+    try:
+        started = datetime.fromisoformat(started_raw)
+    except ValueError:
+        started = now
+        db.execute("UPDATE settings SET value = ? WHERE key = 'demo_started_at'", (started.isoformat(timespec="seconds"),))
+        db.commit()
+    expires = started + timedelta(hours=DEMO_DURATION_HOURS)
+    remaining = max(0, int((expires - now).total_seconds()))
+    return started, expires, remaining, remaining <= 0
+
+
+def _format_demo_remaining(seconds):
+    seconds = max(0, int(seconds or 0))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts = []
+    if days:
+        parts.append(f"{days} día" + ("s" if days != 1 else ""))
+    if hours:
+        parts.append(f"{hours} h")
+    if not days and not hours and minutes:
+        parts.append(f"{minutes} min")
+    if not parts:
+        return "menos de 1 min"
+    return " y ".join(parts[:2])
+
+def init_db(database_url=None, seed_online_demo=False):
+    raw = _raw_connection(database_url)
     db = CompatConnection(raw)
     db.execute(
         """CREATE TABLE IF NOT EXISTS users (
@@ -753,12 +811,15 @@ def init_db():
             exists = db.execute("SELECT 1 FROM legal_acceptances WHERE user_id = ? AND terms_version = ? LIMIT 1", (u["id"], LEGACY_TERMS_VERSION)).fetchone()
             if not exists:
                 db.execute("INSERT INTO legal_acceptances (id, user_id, username, terms_version, accepted_at) VALUES (?, ?, ?, ?, ?)", (uuid.uuid4().hex, u["id"], u["username"], LEGACY_TERMS_VERSION, legacy_ts["value"]))
-    _seed_online_demo(db)
+    if seed_online_demo:
+        _seed_online_demo(db)
     db.commit()
     db.close()
 
 
 init_db()
+if ONLINE_MODE and DEMO_DATABASE_URL:
+    init_db(DEMO_DATABASE_URL, seed_online_demo=True)
 
 
 def _get_setting_value(key, default=""):
@@ -967,15 +1028,23 @@ def enforce_permissions():
 
 
 @app.before_request
-def enforce_demo_read_only():
+def enforce_demo_expiry():
     if not ONLINE_MODE or not session.get("demo_mode"):
         return
     if request.path.startswith("/static/") or request.path in ("/", "/demo", "/logout", "/setup", "/terms"):
         return
-    if request.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
-        return jsonify({"error": "El modo DEMO es de solo lectura. Activa una licencia para guardar cambios."}), 403
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        return redirect(url_for("index"))
+    if not DEMO_DATABASE_URL:
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "La DEMO online todavía no tiene configurada su base de datos de demostración."}), 503
+        return redirect(url_for("home", demo_config_error=1))
+    db = get_db()
+    _started, _expires, remaining, expired = _demo_trial_status(db)
+    if expired:
+        session.clear()
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "La demostración de 3 días ha finalizado. Activa una licencia para continuar."}), 403
+        return redirect(url_for("home", demo_expired=1))
+    g.demo_remaining_seconds = remaining
 
 
 @app.before_request
@@ -1070,7 +1139,7 @@ def setup():
         if not error:
             _failed_attempts.pop("_setup_activation", None)
             db = get_db()
-            if ONLINE_MODE:
+            if ONLINE_MODE and not DEMO_DATABASE_URL:
                 _remove_online_demo(db)
             uid = uuid.uuid4().hex
             db.execute(
@@ -1520,16 +1589,31 @@ def home():
         return redirect(url_for("login"))
     if session.get("user_id"):
         return redirect(url_for("index"))
-    return render_template("online_entry.html", has_account=any_user_exists())
+    return render_template(
+        "online_entry.html",
+        has_account=any_user_exists(),
+        demo_expired=request.args.get("demo_expired") == "1",
+        demo_config_error=request.args.get("demo_config_error") == "1",
+        demo_duration_hours=DEMO_DURATION_HOURS,
+    )
 
 
 @app.route("/demo")
 def demo():
     if not ONLINE_MODE:
         return redirect(url_for("login"))
-    db = get_db()
+    if any_user_exists():
+        return redirect(url_for("login"))
+    if not DEMO_DATABASE_URL:
+        return redirect(url_for("home", demo_config_error=1))
+    db = CompatConnection(_raw_connection(DEMO_DATABASE_URL))
+    _started, _expires, remaining, expired = _demo_trial_status(db)
+    if expired:
+        db.close()
+        return redirect(url_for("home", demo_expired=1))
     _seed_online_demo(db)
     db.commit()
+    db.close()
     session.clear()
     session.permanent = True
     session["demo_mode"] = True
@@ -1538,6 +1622,7 @@ def demo():
     session["role"] = "demo"
     session["permissions"] = "all"
     session["must_change_password"] = False
+    session["demo_remaining_seconds"] = remaining
     return redirect(url_for("index"))
 
 
@@ -1648,7 +1733,19 @@ def change_password():
 @app.route("/app")
 @login_required
 def index():
-    return render_template("index.html", username=session.get("username", ""), demo_mode=bool(session.get("demo_mode")), online_mode=ONLINE_MODE)
+    demo_remaining = None
+    if ONLINE_MODE and session.get("demo_mode") and DEMO_DATABASE_URL:
+        db = get_db()
+        _started, _expires, remaining, _expired = _demo_trial_status(db)
+        demo_remaining = _format_demo_remaining(remaining)
+        session["demo_remaining_seconds"] = remaining
+    return render_template(
+        "index.html",
+        username=session.get("username", ""),
+        demo_mode=bool(session.get("demo_mode")),
+        online_mode=ONLINE_MODE,
+        demo_remaining=demo_remaining,
+    )
 
 
 @app.route("/api/medications", methods=["GET"])
