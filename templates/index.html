@@ -1762,13 +1762,13 @@
     openOverlay('#modal-photo-viewer');
   });
   $('#pf-new-appt').addEventListener('click', ()=> openApptModal(null, currentPatientId));
-  $('#pf-quick-recipe').addEventListener('click', ()=>{ switchProfileTab('diagnostico'); editingHcId=null; clearHcForm(); $('#hc-save').textContent='Guardar consulta'; $('#hc-form-card').style.display='block'; setTimeout(()=>$('#hc-medicamentos')?.focus(),80); });
+  $('#pf-quick-recipe').addEventListener('click', ()=>{ switchProfileTab('diagnostico', {keepHcForm:true}); editingHcId=null; clearHcForm(); $('#hc-save').textContent='Guardar consulta'; $('#hc-form-card').style.display='block'; setTimeout(()=>$('#hc-medicamentos')?.focus(),80); });
   $('#pf-quick-print-recipe').addEventListener('click', ()=>{ const sorted=(hcRecords||[]).slice().sort((a,b)=>b.fecha.localeCompare(a.fecha)); if(!sorted.length){toast('No hay consultas para imprimir');return;} const r=sorted[0],pat=state.patients.find(p=>p.id===currentPatientId); const title='Receta médica — '+escapeHtml(pat?.name||'Paciente'); const content=`<div class="meta"><div><strong>Paciente</strong>${escapeHtml(pat?.name||'Paciente')}</div><div><strong>Fecha</strong>${fmtHuman(r.fecha.slice(0,10))}</div><div><strong>Especialidad</strong>${escapeHtml(r.especialidad||'Consulta médica')}</div></div><div class="summary"><strong>Medicamentos</strong><div style="white-space:pre-wrap;margin-top:8px">${escapeHtml(r.medicamentos||'Sin medicamentos registrados')}</div></div>${r.indicaciones?`<div class="summary"><strong>Indicaciones</strong><div style="white-space:pre-wrap;margin-top:8px">${escapeHtml(r.indicaciones)}</div></div>`:''}`; printDocument(title,content); });
   $('#pf-go-consults').addEventListener('click', ()=>switchProfileTab('diagnostico'));
   $('#pf-new-charge').addEventListener('click', ()=> openChargeModal(null, currentPatientId));
 
   const PF_TAB_PERM = {diagnostico:'pacientes', presupuestos:'presupuestos'};
-  function switchProfileTab(tabKey){
+  function switchProfileTab(tabKey, options={}){
     if(PF_TAB_PERM[tabKey] && !hasPerm(PF_TAB_PERM[tabKey])){
       toast('No tienes permiso para ver esta sección.');
       return;
@@ -1776,7 +1776,7 @@
     $$('.pf-tab').forEach(t=>t.classList.toggle('active', t.dataset.pfTab===tabKey));
     $$('.pf-panel').forEach(p=>p.classList.remove('active'));
     $('#pf-panel-'+tabKey).classList.add('active');
-    if(tabKey==='diagnostico'){ loadHistoriaClinica(currentPatientId); renderPatientCharges(currentPatientId); }
+    if(tabKey==='diagnostico'){ loadHistoriaClinica(currentPatientId, !options.keepHcForm); renderPatientCharges(currentPatientId); }
     if(tabKey==='presupuestos') renderProfileBudgets();
   }
   $$('.pf-tab').forEach(tab=>{
@@ -2510,15 +2510,17 @@
   let hcRecords = [];
   let editingHcId = null;
 
-  async function loadHistoriaClinica(pid){
+  async function loadHistoriaClinica(pid, hideForm=true){
     hcPatientId = pid;
     if(!pid) return;
     try{
       hcRecords = await api(`/api/patients/${pid}/historia-clinica`);
     }catch(err){ hcRecords = []; }
     renderHcList();
-    $('#hc-form-card').style.display = 'none';
-    clearHcForm();
+    if(hideForm){
+      $('#hc-form-card').style.display = 'none';
+      clearHcForm();
+    }
   }
 
   function clearHcForm(){
